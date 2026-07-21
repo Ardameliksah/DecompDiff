@@ -1,0 +1,32 @@
+# ── environments / caches ─────────────────────────────────────────────
+venv_cuda/
+**/__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# ── training artifacts (regenerated in Colab; keep repo light) ─────────
+**/output/
+**/wandb/
+**/results/
+*.pt
+*.pth
+*.ckpt
+*.npz
+colab_bundle.zip
+
+# ── other baselines (not needed to run DecompDiff) ────────────────────
+Diffusion-TS/
+WaveletDiff/
+PaD-TS/
+TimeDiff/
+ImagenTime/
+SigDiffusions/
+TransFusion/
+RGAN/
+c-rnn-gan/
+timeVAE/
+output/
+results/
+
+# NOTE: DecompDiff/data/ (the datasets) is intentionally NOT ignored —
+# the .mat/.csv/.arff/.txt files are small (<5 MB) and needed in Colab.
