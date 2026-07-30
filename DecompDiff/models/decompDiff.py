@@ -73,12 +73,21 @@ class DecompDiff(nn.Module):
         mlp_ratio: float       = 4.0,
         dropout: float         = 0.0,
         freq_dim: int          = 256,
+        use_trend: bool        = True,
+        use_season: bool       = True,
+        use_residual: bool     = True,
     ):
         super().__init__()
 
         self.input_channels  = input_channels
         self.sequence_length = sequence_length
         self.hidden_dim      = hidden_dim
+
+        # stream ablation: which paths feed the fusion stage.
+        # all off  ->  "fusion only" (raw x_t is projected straight into fusion).
+        self.use_trend    = use_trend
+        self.use_season   = use_season
+        self.use_residual = use_residual
 
         # hidden_dim == 0  ->  run everything on the raw channels (no projection)
         self.use_projection = hidden_dim > 0
@@ -133,36 +142,37 @@ class DecompDiff(nn.Module):
         Returns:
             x_0_pred : (B, C, L)  predicted clean sample
         """
-        # 1. decompose noisy input
-        trend_t, season_t = self.decomp(x_t)           # each (B, C, L)
-
-        # 2. shared timestep condition
+        # shared timestep condition
         c = self.time_embedder(t)                       # (B, model_dim)
 
-        # 3a. trend stream
-        h_trend = trend_t.permute(0, 2, 1)             # (B, L, C)
-        h_trend = self.trend_input_proj(h_trend)        # (B, L, model_dim)
-        h_trend = self.trend_pe(h_trend)
-        h_trend = self.trend_dit(h_trend, c)            # (B, L, model_dim)
+        # decompose only if a trend/season stream needs it
+        if self.use_trend or self.use_season:
+            trend_t, season_t = self.decomp(x_t)        # each (B, C, L)
 
-        # 3b. season stream
-        h_season = season_t.permute(0, 2, 1)
-        h_season = self.season_input_proj(h_season)
-        h_season = self.season_pe(h_season)
-        h_season = self.season_dit(h_season, c)         # (B, L, model_dim)
+        parts = []
+        if self.use_trend:                              # trend stream
+            h = self.trend_input_proj(trend_t.permute(0, 2, 1))
+            h = self.trend_pe(h)
+            parts.append(self.trend_dit(h, c))
+        if self.use_season:                             # season stream
+            h = self.season_input_proj(season_t.permute(0, 2, 1))
+            h = self.season_pe(h)
+            parts.append(self.season_dit(h, c))
+        if self.use_residual:                           # residual stream = raw x_t (proj+PE, no DiT)
+            h = self.res_input_proj(x_t.permute(0, 2, 1))
+            parts.append(self.res_pe(h))
 
-        # 3c. residual stream = raw x_t: projection + PE only, NO DiT blocks
-        h_res = x_t.permute(0, 2, 1)
-        h_res = self.res_input_proj(h_res)
-        h_res = self.res_pe(h_res)                      # (B, L, model_dim)
+        # the active streams meet; if none are active -> "fusion only":
+        # feed the raw x_t (proj + PE) straight into the fusion stage.
+        if parts:
+            h = sum(parts)                              # (B, L, model_dim)
+        else:
+            h = self.res_pe(self.res_input_proj(x_t.permute(0, 2, 1)))
 
-        # 4. the three streams meet
-        h = h_trend + h_season + h_res                  # (B, L, model_dim)
-
-        # 5. fusion DiT stack
+        # fusion DiT stack
         h = self.fusion_dit(h, c)                       # (B, L, model_dim)
 
-        # 6. project back to channels and restore (B, C, L)
+        # project back to channels and restore (B, C, L)
         x_0_pred = self.output_proj(h)                  # (B, L, C)
         return x_0_pred.permute(0, 2, 1)               # (B, C, L)
 

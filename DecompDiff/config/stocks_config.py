@@ -14,6 +14,10 @@ class ModelConfig:
     num_heads:       int   = 8
     num_layers:      int   = 1       # DiT blocks per trend / season path
     num_fusion_layers: int = 1       # DiT blocks in the fusion stage (after streams meet)
+    # stream ablation: which paths feed the fusion (all off => fusion-only on raw x_t)
+    use_trend:       bool  = True
+    use_season:      bool  = True
+    use_residual:    bool  = True
     mlp_ratio:       float = 4.0
     dropout:         float = 0.0
     freq_dim:        int   = 256     # sinusoidal basis size in TimestepEmbedder

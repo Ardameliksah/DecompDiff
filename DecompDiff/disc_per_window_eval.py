@@ -70,6 +70,9 @@ def load_model_from_checkpoint(checkpoint_path, cfg, device):
         mlp_ratio         = cfg.model.mlp_ratio,
         dropout           = cfg.model.dropout,
         freq_dim          = cfg.model.freq_dim,
+        use_trend         = getattr(cfg.model, "use_trend", True),
+        use_season        = getattr(cfg.model, "use_season", True),
+        use_residual      = getattr(cfg.model, "use_residual", True),
     ).to(device)
     model.load_state_dict(sd)
     model.eval()
