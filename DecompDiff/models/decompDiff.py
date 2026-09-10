@@ -76,6 +76,7 @@ class DecompDiff(nn.Module):
         use_trend: bool        = True,
         use_season: bool       = True,
         use_residual: bool     = True,
+        use_aux_heads: bool    = False,
     ):
         super().__init__()
 
@@ -133,14 +134,29 @@ class DecompDiff(nn.Module):
         else:
             self.output_proj = nn.Identity()
 
-    def forward(self, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        # --- OPTIONAL auxiliary component heads (training only) ---------------
+        # Off by default. When off, no modules are created, so the parameter
+        # count and the state_dict are byte-identical to the original model and
+        # old checkpoints load unchanged. When on, each stream's DiT output also
+        # gets projected back to (B, C, L) so it can be supervised against its
+        # own component of x_0. sample() never calls these.
+        self.use_aux_heads = use_aux_heads
+        if use_aux_heads:
+            self.trend_head  = nn.Linear(model_dim, input_channels)
+            self.season_head = nn.Linear(model_dim, input_channels)
+
+    def forward(self, x_t: torch.Tensor, t: torch.Tensor, return_aux: bool = False):
         """
         Args:
-            x_t : (B, C, L)  noisy sample at diffusion timestep t
-            t   : (B,)        integer diffusion timesteps
+            x_t        : (B, C, L)  noisy sample at diffusion timestep t
+            t          : (B,)        integer diffusion timesteps
+            return_aux : also return the per-stream component predictions
+                         (only populated when the model was built with
+                         use_aux_heads=True; otherwise an empty dict)
 
         Returns:
-            x_0_pred : (B, C, L)  predicted clean sample
+            x_0_pred            : (B, C, L)  predicted clean sample, or
+            (x_0_pred, aux)     : when return_aux=True
         """
         # shared timestep condition
         c = self.time_embedder(t)                       # (B, model_dim)
@@ -149,15 +165,22 @@ class DecompDiff(nn.Module):
         if self.use_trend or self.use_season:
             trend_t, season_t = self.decomp(x_t)        # each (B, C, L)
 
+        aux = {}
         parts = []
         if self.use_trend:                              # trend stream
             h = self.trend_input_proj(trend_t.permute(0, 2, 1))
             h = self.trend_pe(h)
-            parts.append(self.trend_dit(h, c))
+            f_trend = self.trend_dit(h, c)
+            if self.use_aux_heads:
+                aux["trend"] = self.trend_head(f_trend).permute(0, 2, 1)
+            parts.append(f_trend)
         if self.use_season:                             # season stream
             h = self.season_input_proj(season_t.permute(0, 2, 1))
             h = self.season_pe(h)
-            parts.append(self.season_dit(h, c))
+            f_season = self.season_dit(h, c)
+            if self.use_aux_heads:
+                aux["season"] = self.season_head(f_season).permute(0, 2, 1)
+            parts.append(f_season)
         if self.use_residual:                           # residual stream = raw x_t (proj+PE, no DiT)
             h = self.res_input_proj(x_t.permute(0, 2, 1))
             parts.append(self.res_pe(h))
@@ -174,7 +197,13 @@ class DecompDiff(nn.Module):
 
         # project back to channels and restore (B, C, L)
         x_0_pred = self.output_proj(h)                  # (B, L, C)
-        return x_0_pred.permute(0, 2, 1)               # (B, C, L)
+        x_0_pred = x_0_pred.permute(0, 2, 1)            # (B, C, L)
+
+        # Default return is the bare tensor, exactly as before, so sample() and
+        # any existing caller are untouched. Only compute_loss opts in.
+        if return_aux:
+            return x_0_pred, aux
+        return x_0_pred
 
     @torch.no_grad()
     def sample(
