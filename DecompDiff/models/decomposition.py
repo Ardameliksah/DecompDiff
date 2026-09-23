@@ -55,12 +55,23 @@ class SeriesDecomposition(nn.Module):
         fft = torch.fft.rfft(residual, dim=-1)              # (B, C, L//2+1)  complex
 
         n_keep = self._n_freq_components(L, fft.shape[-1])
-        topk_idx = fft.abs().topk(n_keep, dim=-1).indices  # (B, C, n_keep)
+
+        # Rank bins by |z|^2 rather than |z|: the ordering is identical (sqrt is
+        # monotonic) but it avoids the complex-valued abs kernel, which PyTorch
+        # JIT-compiles at runtime via NVRTC. On CUDA installs with a mismatched
+        # toolchain that compile fails ("failed to open libnvrtc-builtins.so"),
+        # so the whole decomposition is kept to real-valued elementwise ops.
+        mag2 = fft.real.pow(2) + fft.imag.pow(2)            # (B, C, L//2+1)  real
+        topk_idx = mag2.topk(n_keep, dim=-1).indices        # (B, C, n_keep)
 
         mask = torch.zeros(B, C, fft.shape[-1], dtype=torch.bool, device=x.device)
         mask.scatter_(-1, topk_idx, True)
 
-        seasonal = torch.fft.irfft(fft * mask, n=L, dim=-1)  # (B, C, L)
+        # Apply the mask on the real view (real/imag as a trailing dim of size 2)
+        # for the same reason: complex * bool would need another runtime kernel.
+        fft_masked = torch.view_as_real(fft) * mask.unsqueeze(-1).to(fft.real.dtype)
+        seasonal = torch.fft.irfft(torch.view_as_complex(fft_masked.contiguous()),
+                                   n=L, dim=-1)             # (B, C, L)
 
         return trend, seasonal
 
